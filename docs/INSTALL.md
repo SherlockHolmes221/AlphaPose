@@ -19,8 +19,7 @@ conda create -n alphapose python=3.6 -y
 conda activate alphapose
 
 # 2. Install PyTorch
-conda install pytorch==1.1.0 torchvision==0.3.0
-
+conda install pytorch==1.1.0 torchvision==0.3.0 cudatoolkit=9.0 -c pytorch
 # 3. Get AlphaPose
 git clone https://github.com/MVIG-SJTU/AlphaPose.git
 cd AlphaPose
@@ -30,7 +29,7 @@ export PATH=/usr/local/cuda/bin/:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64/:$LD_LIBRARY_PATH
 python -m pip install cython
 sudo apt-get install libyaml-dev
-python setup.py build develop
+python setup.py build develop --user
 ```
 
 #### Install with pip

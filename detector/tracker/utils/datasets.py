@@ -198,7 +198,7 @@ class LoadImagesAndLabels:  # for training
         if plotFlag:
             import matplotlib
             matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
+            # import matplotlib.pyplot as plt
             plt.figure(figsize=(50, 50)) 
             plt.imshow(img[:, :, ::-1])
             plt.plot(labels[:, [1, 3, 3, 1, 1]].T, labels[:, [2, 2, 4, 4, 2]].T, '.-')

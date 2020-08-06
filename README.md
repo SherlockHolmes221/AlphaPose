@@ -1,3 +1,8 @@
+### Get keypoints when giving the bbox
+```
+# input file format see: "examples/example.json"
+sh scripts/get_pose.sh
+```
 
 <div align="center">
     <img src="docs/logo.jpg", width="400">

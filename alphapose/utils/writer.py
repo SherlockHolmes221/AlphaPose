@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+# import h5py
 
 from alphapose.utils.transforms import get_func_heatmap_to_coord
 from alphapose.utils.pPose_nms import pose_nms
@@ -50,6 +51,9 @@ class DataWriter():
             from PoseFlow.poseflow_infer import PoseFlowWrapper
             self.pose_flow_wrapper = PoseFlowWrapper(save_path=os.path.join(opt.outputpath, 'poseflow'))
 
+        # if outputpath is not None:
+        #     self.save_features_h5py = h5py.File(os.path.join(outputpath, "part_features.hdf5"), "w")
+
     def start_worker(self, target):
         if self.opt.sp:
             p = Thread(target=target, args=())
@@ -79,7 +83,8 @@ class DataWriter():
         # keep looping infinitelyd
         while True:
             # ensure the queue is not empty and get item
-            (boxes, scores, ids, hm_data, cropped_boxes, orig_img, im_name) = self.wait_and_get(self.result_queue)
+            (boxes, scores, ids, hm_data, cropped_boxes, orig_img, im_name) = self.wait_and_get(
+                self.result_queue)
             if orig_img is None:
                 # if the thread indicator variable is set (img is None), stop the thread
                 self.wait_and_put(self.final_result_queue, None)
@@ -94,28 +99,65 @@ class DataWriter():
             else:
                 # location prediction (n, kp, 2) | score prediction (n, kp, 1)
                 pred = hm_data.cpu().data.numpy()
+                # features = features.cpu().data.numpy()
+                # print(pred.shape)  # (9, 17, 64, 48)
+                # print(features.shape)  # (9, 256, 64, 48)
                 assert pred.ndim == 4
 
                 if hm_data.size()[1] == 49:
-                    self.eval_joints = [*range(0,49)]
+                    self.eval_joints = [*range(0, 49)]
                 pose_coords = []
                 pose_scores = []
+
+                # part_features = []
                 for i in range(hm_data.shape[0]):
                     bbox = cropped_boxes[i].tolist()
+
                     pose_coord, pose_score = self.heatmap_to_coord(pred[i][self.eval_joints], bbox)
                     pose_coords.append(torch.from_numpy(pose_coord).unsqueeze(0))
                     pose_scores.append(torch.from_numpy(pose_score).unsqueeze(0))
+                    # part_features.append(part_feature)
+
                 preds_img = torch.cat(pose_coords)
                 preds_scores = torch.cat(pose_scores)
-                result = pose_nms(boxes, scores, ids, preds_img, preds_scores, self.opt.min_box_area)
+                # print(len(part_features)) # 9
+                # part_features = np.array(part_features)
+                # assert len(part_features) == len(preds_img)
+                # self.save_features_h5py.create_group(im_name)
+                # self.save_features_h5py[im_name].create_dataset(
+                #     'part_features',
+                #     data=part_features)
+
+                # print(boxes.size(), ids.size(), scores.size())
+                # print(preds_img.size(), preds_scores.size())
+                # torch.Size([1, 4])
+                # torch.Size([1])
+                # torch.Size([1])
+                # torch.Size([1, 17, 2])
+                # torch.Size([1, 17, 1])
+                # result = pose_nms(boxes, scores, ids, preds_img, preds_scores, self.opt.min_box_area)
+
+                final_result = []
+                # print(ids)
+
+                for i in range(len(boxes)):
+                    final_result.append({
+                        'keypoints': preds_img[i],
+                        'kp_score': preds_scores[i],
+                        'proposal_score': scores[i],
+                        'idx': ids[i].tolist()
+                    })
+
                 result = {
                     'imgname': im_name,
-                    'result': result
+                    'result': final_result
                 }
+                # print(result)
                 if self.opt.pose_track:
                     poseflow_result = self.pose_flow_wrapper.step(orig_img, result)
                     for i in range(len(poseflow_result)):
                         result['result'][i]['idx'] = poseflow_result[i]['idx']
+
                 self.wait_and_put(self.final_result_queue, result)
                 if self.opt.save_img or self.save_video or self.opt.vis:
                     if hm_data.size()[1] == 49:
@@ -124,7 +166,7 @@ class DataWriter():
                         from alphapose.utils.vis import vis_frame_fast as vis_frame
                     else:
                         from alphapose.utils.vis import vis_frame
-                    img = vis_frame(orig_img, result, add_bbox=(self.opt.pose_track | self.opt.tracking | self.opt.showbox))
+                    img = vis_frame(orig_img, result, add_bbox=True)
                     self.write_image(img, im_name, stream=stream if self.save_video else None)
 
     def write_image(self, img, im_name, stream=None):
@@ -171,7 +213,7 @@ class DataWriter():
     def clear_queues(self):
         self.clear(self.result_queue)
         self.clear(self.final_result_queue)
-        
+
     def clear(self, queue):
         while not queue.empty():
             queue.get()
@@ -195,4 +237,3 @@ class DataWriter():
         else:
             print("Unknow video format {}, will use .mp4 instead of it".format(ext))
             return cv2.VideoWriter_fourcc(*'mp4v'), '.mp4'
-

@@ -1,11 +1,13 @@
 """Script for single-gpu/multi-gpu demo."""
+import sys
+
 import argparse
 import os
 import platform
-import sys
 import time
-
+import json
 import numpy as np
+
 import torch
 from tqdm import tqdm
 
@@ -29,8 +31,6 @@ parser.add_argument('--sp', default=False, action='store_true',
                     help='Use single process for pytorch')
 parser.add_argument('--detector', dest='detector',
                     help='detector name', default="yolo")
-parser.add_argument('--detfile', dest='detfile',
-                    help='detection result file', default="")
 parser.add_argument('--indir', dest='inputpath',
                     help='image-directory', default="")
 parser.add_argument('--list', dest='inputlist',
@@ -43,8 +43,6 @@ parser.add_argument('--save_img', default=False, action='store_true',
                     help='save result as image')
 parser.add_argument('--vis', default=False, action='store_true',
                     help='visualize image')
-parser.add_argument('--showbox', default=False, action='store_true',
-                    help='visualize human bbox')
 parser.add_argument('--profile', default=False, action='store_true',
                     help='add speed profiling at screen output')
 parser.add_argument('--format', type=str,
@@ -58,7 +56,8 @@ parser.add_argument('--posebatch', type=int, default=80,
 parser.add_argument('--eval', dest='eval', default=False, action='store_true',
                     help='save the result json as coco format, using image index(int) instead of image name(str)')
 parser.add_argument('--gpus', type=str, dest='gpus', default="0",
-                    help='choose which cuda device to use by index and input comma to use multi gpus, e.g. 0,1,2,3. (input -1 for cpu only)')
+                    help='choose which cuda device to use by index and input comma to use multi gpus, '
+                         'e.g. 0,1,2,3. (input -1 for cpu only)')
 parser.add_argument('--qsize', type=int, dest='qsize', default=1024,
                     help='the length of result buffer, where reducing it will lower requirement of cpu memory')
 parser.add_argument('--flip', default=False, action='store_true',
@@ -76,6 +75,8 @@ parser.add_argument('--vis_fast', dest='vis_fast',
                     help='use fast rendering', action='store_true', default=False)
 parser.add_argument('--pose_track', dest='pose_track',
                     help='track humans in video', action='store_true', default=False)
+parser.add_argument('--dataset')
+
 
 args = parser.parse_args()
 cfg = update_config(args.cfg)
@@ -83,7 +84,9 @@ cfg = update_config(args.cfg)
 if platform.system() == 'Windows':
     args.sp = True
 
-args.gpus = [int(i) for i in args.gpus.split(',')] if torch.cuda.device_count() >= 1 else [-1]
+# print(torch.cuda.device_count())
+# args.gpus = [int(i) for i in args.gpus.split(',')] if torch.cuda.device_count() >= 1 else [-1]
+args.gpus = [int(i) for i in args.gpus.split(',')]
 args.device = torch.device("cuda:" + str(args.gpus[0]) if args.gpus[0] >= 0 else "cpu")
 args.detbatch = args.detbatch * len(args.gpus)
 args.posebatch = args.posebatch * len(args.gpus)
@@ -108,29 +111,31 @@ def check_input():
         else:
             raise IOError('Error: --video must refer to a video file, not directory.')
 
-    # for detection results
-    if len(args.detfile):
-        if os.path.isfile(args.detfile):
-            detfile = args.detfile
-            return 'detfile', detfile
-        else:
-            raise IOError('Error: --detfile must refer to a detection json file, not directory.')
-
     # for images
     if len(args.inputpath) or len(args.inputlist) or len(args.inputimg):
+
         inputpath = args.inputpath
         inputlist = args.inputlist
         inputimg = args.inputimg
 
-        if len(inputlist):
-            im_names = open(inputlist, 'r').readlines()
-        elif len(inputpath) and inputpath != '/':
-            for root, dirs, files in os.walk(inputpath):
-                im_names = files
-        elif len(inputimg):
-            im_names = [inputimg]
+        print("----------------------------------------")
+        print(inputlist)
 
-        return 'image', im_names
+        if len(inputlist):
+            file = json.load(open(inputlist, "r"))
+            print(len(file))
+            im_names = file.keys()
+        else:
+            assert False
+
+        # input_source = {}
+        # i = 0
+        # for key, value in file.items():
+        #     if i >= 21322:
+        #         input_source[key] = value
+        #     i += 1
+        # print(len(input_source))
+        return 'image', im_names, file
 
     else:
         raise NotImplementedError
@@ -140,7 +145,8 @@ def print_finish_info():
     print('===========================> Finish Model Running.')
     if (args.save_img or args.save_video) and not args.vis_fast:
         print('===========================> Rendering remaining images in the queue...')
-        print('===========================> If this step takes too long, you can enable the --vis_fast flag to use fast rendering (real-time).')
+        print(
+            '===========================> If this step takes too long, you can enable the --vis_fast flag to use fast rendering (real-time).')
 
 
 def loop():
@@ -151,24 +157,14 @@ def loop():
 
 
 if __name__ == "__main__":
-    mode, input_source = check_input()
+    mode, input_source, file = check_input()
 
     if not os.path.exists(args.outputpath):
         os.makedirs(args.outputpath)
 
     # Load detection loader
-    if mode == 'webcam':
-        print(1)
-        det_loader = WebCamDetectionLoader(input_source, get_detector(args), cfg, args)
-        det_worker = det_loader.start()
-    elif mode == 'detfile':
-        print(2)
-        det_loader = FileDetectionLoader(input_source, cfg, args)
-        det_worker = det_loader.start()
-    else:
-        print(3)
-        det_loader = DetectionLoader(input_source, get_detector(args), cfg, args, batchSize=args.detbatch, mode=mode, queueSize=args.qsize)
-        det_worker = det_loader.start()
+    det_loader = DetectionLoader(file, get_detector(args), cfg, args, batchSize=args.detbatch,
+                                 mode=mode, dataset=args.dataset).start()
 
     # Load pose model
     pose_model = builder.build_sppe(cfg.MODEL, preset_cfg=cfg.DATA_PRESET)
@@ -190,23 +186,13 @@ if __name__ == "__main__":
 
     # Init data writer
     queueSize = 2 if mode == 'webcam' else args.qsize
-    if args.save_video and mode != 'image':
-        from alphapose.utils.writer import DEFAULT_VIDEO_SAVE_OPT as video_save_opt
-        if mode == 'video':
-            video_save_opt['savepath'] = os.path.join(args.outputpath, 'AlphaPose_' + os.path.basename(input_source))
-        else:
-            video_save_opt['savepath'] = os.path.join(args.outputpath, 'AlphaPose_webcam' + str(input_source) + '.mp4')
-        video_save_opt.update(det_loader.videoinfo)
-        writer = DataWriter(cfg, args, save_video=True, video_save_opt=video_save_opt, queueSize=queueSize).start()
-    else:
-        writer = DataWriter(cfg, args, save_video=False, queueSize=queueSize).start()
+    writer = DataWriter(cfg, args, save_video=False, queueSize=queueSize).start()
 
     if mode == 'webcam':
         print('Starting webcam demo, press Ctrl + C to terminate...')
         sys.stdout.flush()
         im_names_desc = tqdm(loop())
     else:
-
         data_len = det_loader.length
         im_names_desc = tqdm(range(data_len), dynamic_ncols=True)
 
@@ -214,18 +200,12 @@ if __name__ == "__main__":
     if args.flip:
         batchSize = int(batchSize / 2)
     try:
-
         for i in im_names_desc:
             start_time = getTime()
             with torch.no_grad():
                 (inps, orig_img, im_name, boxes, scores, ids, cropped_boxes) = det_loader.read()
-                print('yy')
-                if orig_img is None:
-                    break
-
-                if boxes is None or boxes.nelement() == 0:
-                    writer.save(None, None, None, None, None, orig_img, os.path.basename(im_name))
-                    continue
+                assert orig_img is not None
+                assert boxes is not None or boxes.nelement() != 0
                 if args.profile:
                     ckpt_time, det_time = getTime(start_time)
                     runtime_profile['dt'].append(det_time)
@@ -237,21 +217,23 @@ if __name__ == "__main__":
                     leftover = 1
                 num_batches = datalen // batchSize + leftover
                 hm = []
+                # print(num_batches) # 1
                 for j in range(num_batches):
                     inps_j = inps[j * batchSize:min((j + 1) * batchSize, datalen)]
                     if args.flip:
                         inps_j = torch.cat((inps_j, flip(inps_j)))
-                    hm_j, features = pose_model(inps_j)
+                    hm_j = pose_model(inps_j)
                     if args.flip:
                         hm_j_flip = flip_heatmap(hm_j[int(len(hm_j) / 2):], det_loader.joint_pairs, shift=True)
                         hm_j = (hm_j[0:int(len(hm_j) / 2)] + hm_j_flip) / 2
                     hm.append(hm_j)
                 hm = torch.cat(hm)
+                # print("hm", hm.shape) # torch.Size([9, 17, 64, 48])
                 if args.profile:
                     ckpt_time, pose_time = getTime(ckpt_time)
                     runtime_profile['pt'].append(pose_time)
                 hm = hm.cpu()
-                writer.save(boxes, scores, ids, hm, cropped_boxes, orig_img, os.path.basename(im_name), features)
+                writer.save(boxes, scores, ids, hm, cropped_boxes, orig_img, os.path.basename(im_name))
 
                 if args.profile:
                     ckpt_time, post_time = getTime(ckpt_time)
@@ -261,31 +243,27 @@ if __name__ == "__main__":
                 # TQDM
                 im_names_desc.set_description(
                     'det time: {dt:.4f} | pose time: {pt:.4f} | post processing: {pn:.4f}'.format(
-                        dt=np.mean(runtime_profile['dt']), pt=np.mean(runtime_profile['pt']), pn=np.mean(runtime_profile['pn']))
+                        dt=np.mean(runtime_profile['dt']), pt=np.mean(runtime_profile['pt']),
+                        pn=np.mean(runtime_profile['pn']))
                 )
         print_finish_info()
-        while(writer.running()):
+        while (writer.running()):
             time.sleep(1)
             print('===========================> Rendering remaining ' + str(writer.count()) + ' images in the queue...')
         writer.stop()
         det_loader.stop()
-    except Exception as e:
-        print(repr(e))
-        print('An error as above occurs when processing the images, please check it')
-        pass
     except KeyboardInterrupt:
         print_finish_info()
         # Thread won't be killed when press Ctrl+C
         if args.sp:
             det_loader.terminate()
-            while(writer.running()):
+            while (writer.running()):
                 time.sleep(1)
-                print('===========================> Rendering remaining ' + str(writer.count()) + ' images in the queue...')
+                print('===========================> Rendering remaining ' + str(
+                    writer.count()) + ' images in the queue...')
             writer.stop()
         else:
             # subprocesses are killed, manually clear queues
-            for p in det_worker:
-                p.terminate()
             writer.commit()
             writer.clear_queues()
             # det_loader.clear_queues()

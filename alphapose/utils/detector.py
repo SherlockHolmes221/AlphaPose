@@ -14,16 +14,39 @@ from alphapose.utils.presets import SimpleTransform
 
 
 class DetectionLoader():
-    def __init__(self, input_source, detector, cfg, opt, mode='image', batchSize=1, queueSize=128):
+    def __init__(self, input_source, detector, cfg, opt, mode='image', batchSize=1, queueSize=128, dataset="vcoco"):
         self.cfg = cfg
         self.opt = opt
         self.mode = mode
         self.device = opt.device
+        self.dataset = dataset
+
+        self.input_source = input_source
 
         if mode == 'image':
             self.img_dir = opt.inputpath
-            self.imglist = [os.path.join(self.img_dir, im_name.rstrip('\n').rstrip('\r')) for im_name in input_source]
-            self.datalen = len(input_source)
+
+            if dataset == 'hico':
+                if "train" in list(self.input_source.keys())[0]:
+                    subset = "train"
+                else:
+                    subset = "test"
+                self.imglist = [
+                    f"/home/xian/Documents/data/hico_20160224_det/images/{subset}2015/" +
+                    str(name) + ".jpg" for name in input_source.keys()]
+
+            elif dataset == 'vcoco':
+                if "train" in list(self.input_source.keys())[0] or "val" in list(self.input_source.keys())[0]:
+                    subset = "train"
+                else:
+                    subset = "val"
+                self.imglist = [
+                    f"/home/xian/Documents/data/coco/images/{subset}2014/COCO_{subset}2014_" + str(name).split("_")[-1].zfill(
+                        12) + ".jpg" for name in input_source.keys()]
+            else:
+                assert False
+            self.datalen = len(self.input_source)
+
         elif mode == 'video':
             stream = cv2.VideoCapture(input_source)
             assert stream.isOpened(), 'Cannot capture source'
@@ -36,6 +59,7 @@ class DetectionLoader():
             stream.release()
 
         self.detector = detector
+
         self.batchSize = batchSize
         leftover = 0
         if (self.datalen) % batchSize:
@@ -61,6 +85,7 @@ class DetectionLoader():
         det_queue: the buffer storing human detection results
         pose_queue: the buffer storing post-processed cropped human image for pose estimation
         """
+
         if opt.sp:
             self._stopped = False
             self.image_queue = Queue(maxsize=queueSize)
@@ -84,17 +109,20 @@ class DetectionLoader():
     def start(self):
         # start a thread to pre process images for object detection
         if self.mode == 'image':
-            image_preprocess_worker = self.start_worker(self.image_preprocess)
+            self.image_preprocess_worker = self.start_worker(self.image_preprocess)
         elif self.mode == 'video':
-            image_preprocess_worker = self.start_worker(self.frame_preprocess)
+            self.image_preprocess_worker = self.start_worker(self.frame_preprocess)
         # start a thread to detect human in images
-        image_detection_worker = self.start_worker(self.image_detection)
+        self.image_detection_worker = self.start_worker(self.image_detection)
         # start a thread to post process cropped human image for pose estimation
-        image_postprocess_worker = self.start_worker(self.image_postprocess)
-
-        return [image_preprocess_worker, image_detection_worker, image_postprocess_worker]
+        self.image_postprocess_worker = self.start_worker(self.image_postprocess)
+        return self
 
     def stop(self):
+        # end threads
+        self.image_preprocess_worker.join()
+        self.image_detection_worker.join()
+        self.image_postprocess_worker.join()
         # clear queues
         self.clear_queues()
 
@@ -137,11 +165,17 @@ class DetectionLoader():
                 if isinstance(img_k, np.ndarray):
                     img_k = torch.from_numpy(img_k)
                 # add one dimension at the front for batch if image shape (3,h,w)
+                # print(img_k.size()) # torch.Size([1, 3, 608, 608])
                 if img_k.dim() == 3:
                     img_k = img_k.unsqueeze(0)
                 orig_img_k = scipy.misc.imread(im_name_k, mode='RGB')
                 im_dim_list_k = orig_img_k.shape[1], orig_img_k.shape[0]
 
+                # print(img_k.size(), orig_img_k.shape, im_name_k, im_dim_list_k)
+                # torch.Size([1, 3, 608, 608])
+                # (480, 640, 3)
+                # /home/xian/Documents/data/hico_20160224_det/images/train2015/HICO_train2015_00000001.jpg
+                # (640, 480)
                 imgs.append(img_k)
                 orig_imgs.append(orig_img_k)
                 im_names.append(im_name_k)
@@ -149,10 +183,17 @@ class DetectionLoader():
 
             with torch.no_grad():
                 # Human Detection
+                # print(len(imgs)) #  5
                 imgs = torch.cat(imgs)
                 im_dim_list = torch.FloatTensor(im_dim_list).repeat(1, 2)
                 # im_dim_list_ = im_dim_list
 
+            # print(im_dim_list)
+            # tensor([[640., 480., 640., 480.],
+            #         [640., 480., 640., 480.],
+            #         [599., 640., 599., 640.],
+            #         [640., 427., 640., 427.],
+            #         [640., 425., 640., 425.]])
             self.wait_and_put(self.image_queue, (imgs, orig_imgs, im_names, im_dim_list))
 
     def frame_preprocess(self):
@@ -207,43 +248,112 @@ class DetectionLoader():
             self.wait_and_put(self.image_queue, (imgs, orig_imgs, im_names, im_dim_list))
         stream.release()
 
+    # def image_detection(self):
+    #     for i in range(self.num_batches):
+    #         imgs, orig_imgs, im_names, im_dim_list = self.wait_and_get(self.image_queue)
+    #         if imgs is None or self.stopped:
+    #             self.wait_and_put(self.det_queue, (None, None, None, None, None, None, None))
+    #             return
+    #
+    #         with torch.no_grad():
+    #             # pad useless images to fill a batch, else there will be a bug
+    #             for pad_i in range(self.batchSize - len(imgs)):
+    #                 imgs = torch.cat((imgs, torch.unsqueeze(imgs[0], dim=0)), 0)
+    #                 im_dim_list = torch.cat((im_dim_list, torch.unsqueeze(im_dim_list[0], dim=0)), 0)
+    #
+    #             dets = self.detector.images_detection(imgs, im_dim_list)
+    #
+    #             if isinstance(dets, int) or dets.shape[0] == 0:
+    #                 assert False
+    #                 for k in range(len(orig_imgs)):
+    #                     self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], None, None, None, None, None))
+    #                 continue
+    #             if isinstance(dets, np.ndarray):
+    #                 dets = torch.from_numpy(dets)
+    #             dets = dets.cpu()
+    #             boxes = dets[:, 1:5]
+    #             scores = dets[:, 5:6]
+    #             if self.opt.tracking:
+    #                 ids = dets[:, 6:7]
+    #             else:
+    #                 ids = torch.zeros(scores.shape)
+    #
+    #         for k in range(len(orig_imgs)):
+    #             boxes_k = boxes[dets[:, 0] == k]
+    #             if isinstance(boxes_k, int) or boxes_k.shape[0] == 0:
+    #                 self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], None, None, None, None, None))
+    #                 continue
+    #             inps = torch.zeros(boxes_k.size(0), 3, *self._input_size)
+    #             cropped_boxes = torch.zeros(boxes_k.size(0), 4)
+    #
+    #             self.wait_and_put(self.det_queue, (
+    #             orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+
     def image_detection(self):
         for i in range(self.num_batches):
             imgs, orig_imgs, im_names, im_dim_list = self.wait_and_get(self.image_queue)
+            #  print(imgs)
             if imgs is None or self.stopped:
-                self.wait_and_put(self.det_queue, (None, None, None, None, None, None, None))
-                return
+                assert False
 
-            with torch.no_grad():
-                # pad useless images to fill a batch, else there will be a bug
-                for pad_i in range(self.batchSize - len(imgs)):
-                    imgs = torch.cat((imgs, torch.unsqueeze(imgs[0], dim=0)), 0)
-                    im_dim_list = torch.cat((im_dim_list, torch.unsqueeze(im_dim_list[0], dim=0)), 0)
-
-                dets = self.detector.images_detection(imgs, im_dim_list)
-                if isinstance(dets, int) or dets.shape[0] == 0:
-                    for k in range(len(orig_imgs)):
-                        self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], None, None, None, None, None))
-                    continue
-                if isinstance(dets, np.ndarray):
-                    dets = torch.from_numpy(dets)
-                dets = dets.cpu()
-                boxes = dets[:, 1:5]
-                scores = dets[:, 5:6]
-                if self.opt.tracking:
-                    ids = dets[:, 6:7]
-                else:
-                    ids = torch.zeros(scores.shape)
+            # with torch.no_grad():
+            #     # pad useless images to fill a batch, else there will be a bug
+            #     for pad_i in range(self.batchSize - len(imgs)):
+            #         imgs = torch.cat((imgs, torch.unsqueeze(imgs[0], dim=0)), 0)
+            #         im_dim_list = torch.cat((im_dim_list, torch.unsqueeze(im_dim_list[0], dim=0)), 0)
+            #
+            #     dets = self.detector.images_detection(imgs, im_dim_list)
+            #
+            #     if isinstance(dets, int) or dets.shape[0] == 0:
+            #         assert False
+            #         for k in range(len(orig_imgs)):
+            #             self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], None, None, None, None, None))
+            #         continue
+            #     if isinstance(dets, np.ndarray):
+            #         dets = torch.from_numpy(dets)
+            #     dets = dets.cpu()
+            #     boxes = dets[:, 1:5]
+            #     scores = dets[:, 5:6]
+            #     if self.opt.tracking:
+            #         ids = dets[:, 6:7]
+            #     else:
+            #         ids = torch.zeros(scores.shape)
 
             for k in range(len(orig_imgs)):
-                boxes_k = boxes[dets[:, 0] == k]
-                if isinstance(boxes_k, int) or boxes_k.shape[0] == 0:
-                    self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], None, None, None, None, None))
-                    continue
-                inps = torch.zeros(boxes_k.size(0), 3, *self._input_size)
-                cropped_boxes = torch.zeros(boxes_k.size(0), 4)
+                name = im_names[k].split(".")[0].split("/")[-1]
+                ids = []
+                boxes = []
+                scores = []
+                if self.dataset == 'vcoco':
+                    name = str(int(name.split("_")[-1]))
+                    if "train_" + name in self.input_source:
+                        name = "train_" + name
+                    elif "val_" + name in self.input_source:
+                        name = "val_" + name
+                    else:
+                        name = "test_" + name
+                for rpn_id, value in self.input_source[str(name)].items():
+                    ids.append(int(float(rpn_id)))
+                    boxes.append([float(value['box'][0]),
+                                  float(value['box'][1]),
+                                  float(value['box'][2]),
+                                  float(value['box'][3])])
+                    scores.append(value['score'])
 
-                self.wait_and_put(self.det_queue, (orig_imgs[k], im_names[k], boxes_k, scores[dets[:, 0] == k], ids[dets[:, 0] == k], inps, cropped_boxes))
+                boxes = torch.from_numpy(np.array(boxes))
+                scores = torch.from_numpy(np.array(scores))
+                ids = torch.from_numpy(np.array(ids))
+
+                inps = torch.zeros(boxes.size(0), 3, *self._input_size)
+                cropped_boxes = torch.zeros(boxes.size(0), 4)
+
+                self.wait_and_put(self.det_queue, (orig_imgs[k],
+                                                   im_names[k],
+                                                   boxes,
+                                                   scores,
+                                                   ids,
+                                                   inps,
+                                                   cropped_boxes))
 
     def image_postprocess(self):
         for i in range(self.datalen):

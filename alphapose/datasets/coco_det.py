@@ -68,7 +68,7 @@ class Mscoco_det(data.Dataset):
             img_id = int(img_id)
         else:
             img_id = det_res['image_id']
-        img_path = './data/coco/val2017/%012d.jpg' % img_id
+        img_path = './data/coco/trainval2017/%012d.jpg' % img_id
 
         # Load image
         image = scipy.misc.imread(img_path, mode='RGB')
@@ -77,7 +77,9 @@ class Mscoco_det(data.Dataset):
         x1, y1, w, h = det_res['bbox']
         bbox = [x1, y1, x1 + w, y1 + h]
         inp, bbox = self.transformation.test_transform(image, bbox)
-        return inp, torch.Tensor(bbox), torch.Tensor([det_res['bbox']]), torch.Tensor([det_res['image_id']]), torch.Tensor([det_res['score']]), torch.Tensor([imght]), torch.Tensor([imgwidth])
+        return inp, torch.Tensor(bbox), torch.Tensor([det_res['bbox']]), \
+               torch.Tensor([det_res['image_id']]), torch.Tensor([det_res['score']]), \
+               torch.Tensor([imght]), torch.Tensor([imgwidth])
 
     def __len__(self):
         return len(self._det_json)
